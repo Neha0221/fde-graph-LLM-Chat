@@ -7,7 +7,13 @@ const buildCustomerNodes = () => {
     SELECT bp.business_partner, bp.full_name, bp.partner_category, bp.is_blocked,
            a.city_name, a.country
     FROM business_partners bp
-    LEFT JOIN business_partner_addresses a ON a.business_partner = bp.business_partner
+    LEFT JOIN business_partner_addresses a
+      ON a.business_partner = bp.business_partner
+      AND a.address_id = (
+        SELECT MIN(address_id)
+        FROM business_partner_addresses
+        WHERE business_partner = bp.business_partner
+      )
   `).all();
 
   return rows.map((r) => ({
@@ -143,6 +149,49 @@ const buildPaymentNodes = () => {
   }));
 };
 
+// Only include products that are actually referenced in billing documents
+const buildProductNodes = () => {
+  const rows = db.prepare(`
+    SELECT DISTINCT p.product, p.product_type, p.base_unit, p.product_group,
+           pd.product_description
+    FROM products p
+    JOIN billing_document_items bdi ON bdi.material = p.product
+    LEFT JOIN product_descriptions pd
+      ON pd.product = p.product AND pd.language = 'EN'
+  `).all();
+
+  return rows.map((r) => ({
+    id: `PR:${r.product}`,
+    type: "product",
+    label: r.product_description || r.product,
+    data: {
+      product: r.product,
+      product_type: r.product_type,
+      base_unit: r.base_unit,
+      product_group: r.product_group,
+    },
+  }));
+};
+
+// Only include plants that are actually referenced in deliveries
+const buildPlantNodes = () => {
+  const rows = db.prepare(`
+    SELECT DISTINCT pl.plant, pl.plant_name
+    FROM plants pl
+    JOIN outbound_delivery_items odi ON odi.plant = pl.plant
+  `).all();
+
+  return rows.map((r) => ({
+    id: `PL:${r.plant}`,
+    type: "plant",
+    label: r.plant_name || r.plant,
+    data: {
+      plant: r.plant,
+      plant_name: r.plant_name,
+    },
+  }));
+};
+
 // ---- Edge builders ----
 
 const buildCustomerToOrderEdges = () => {
@@ -223,6 +272,36 @@ const buildJournalToPaymentEdges = () => {
   }));
 };
 
+const buildBillingToProductEdges = () => {
+  const rows = db.prepare(`
+    SELECT DISTINCT billing_document, material
+    FROM billing_document_items
+    WHERE material IS NOT NULL
+  `).all();
+
+  return rows.map((r) => ({
+    id: `E:B:${r.billing_document}->PR:${r.material}`,
+    source: `B:${r.billing_document}`,
+    target: `PR:${r.material}`,
+    relation: "billed_for",
+  }));
+};
+
+const buildDeliveryToPlantEdges = () => {
+  const rows = db.prepare(`
+    SELECT DISTINCT delivery_document, plant
+    FROM outbound_delivery_items
+    WHERE plant IS NOT NULL
+  `).all();
+
+  return rows.map((r) => ({
+    id: `E:D:${r.delivery_document}->PL:${r.plant}`,
+    source: `D:${r.delivery_document}`,
+    target: `PL:${r.plant}`,
+    relation: "ships_from",
+  }));
+};
+
 // ---- Main graph builder ----
 
 const getFullGraph = () => {
@@ -233,6 +312,8 @@ const getFullGraph = () => {
     ...buildBillingNodes(),
     ...buildJournalNodes(),
     ...buildPaymentNodes(),
+    ...buildProductNodes(),
+    ...buildPlantNodes(),
   ];
 
   // deduplicate nodes by id
@@ -245,6 +326,8 @@ const getFullGraph = () => {
     ...buildDeliveryToBillingEdges(),
     ...buildBillingToJournalEdges(),
     ...buildJournalToPaymentEdges(),
+    ...buildBillingToProductEdges(),
+    ...buildDeliveryToPlantEdges(),
   ];
 
   // deduplicate edges by id
@@ -273,8 +356,8 @@ const getNodeWithNeighbors = (nodeId) => {
 
   const neighborIds = new Set();
   for (const e of neighborEdges) {
-    neighborIds.add(e.source);
-    neighborIds.add(e.target);
+    if (e.source !== nodeId) neighborIds.add(e.source);
+    if (e.target !== nodeId) neighborIds.add(e.target);
   }
 
   const neighborNodes = Array.from(neighborIds)

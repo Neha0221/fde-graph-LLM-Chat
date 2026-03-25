@@ -9,6 +9,8 @@ const RELATION_LABELS = {
   generates: 'Generates',
   creates_journal: 'Creates Journal',
   settled_by: 'Settled By',
+  billed_for: 'Billed For',
+  ships_from: 'Ships From',
 };
 
 const NodeDetail = ({

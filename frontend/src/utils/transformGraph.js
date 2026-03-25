@@ -1,4 +1,4 @@
-// O2C flow order — left to right on canvas
+// O2C flow order — left to right on canvas (supporting entities below)
 const TYPE_ORDER = [
   'customer',
   'sales_order',
@@ -6,17 +6,22 @@ const TYPE_ORDER = [
   'billing_document',
   'journal_entry',
   'payment',
+  'product',
+  'plant',
 ];
 
 // Each type occupies a rectangular region on the canvas
-// Regions are arranged left→right following the O2C flow
+// Core O2C flow: left→right on top row
+// Supporting entities: second row below
 const TYPE_REGIONS = {
-  customer:         { x1: 50,   y1: 100, x2: 280,  y2: 900 },
-  sales_order:      { x1: 380,  y1: 50,  x2: 950,  y2: 950 },
-  delivery:         { x1: 1050, y1: 100, x2: 1580, y2: 900 },
-  billing_document: { x1: 1680, y1: 50,  x2: 2500, y2: 950 },
-  journal_entry:    { x1: 2600, y1: 50,  x2: 3050, y2: 480 },
-  payment:          { x1: 2600, y1: 530, x2: 3050, y2: 950 },
+  customer:         { x1: 50,   y1: 100,  x2: 280,  y2: 900 },
+  sales_order:      { x1: 380,  y1: 50,   x2: 950,  y2: 950 },
+  delivery:         { x1: 1050, y1: 100,  x2: 1580, y2: 900 },
+  billing_document: { x1: 1680, y1: 50,   x2: 2500, y2: 950 },
+  journal_entry:    { x1: 2600, y1: 50,   x2: 3050, y2: 480 },
+  payment:          { x1: 2600, y1: 530,  x2: 3050, y2: 950 },
+  product:          { x1: 1680, y1: 1050, x2: 2500, y2: 1600 },
+  plant:            { x1: 1050, y1: 1050, x2: 1580, y2: 1600 },
 };
 
 export const NODE_COLORS = {
@@ -26,6 +31,8 @@ export const NODE_COLORS = {
   billing_document: '#F59E0B',
   journal_entry:    '#EF4444',
   payment:          '#8B5CF6',
+  product:          '#EC4899',
+  plant:            '#14B8A6',
 };
 
 export const NODE_TYPE_LABELS = {
@@ -35,6 +42,8 @@ export const NODE_TYPE_LABELS = {
   billing_document: 'Billing Doc',
   journal_entry:    'Journal Entry',
   payment:          'Payment',
+  product:          'Product',
+  plant:            'Plant',
 };
 
 /**

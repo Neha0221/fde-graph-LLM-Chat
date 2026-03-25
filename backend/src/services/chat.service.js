@@ -64,8 +64,8 @@ const isTopicRelevant = async (groq, message) => {
     // IRRELEVANT contains the substring RELEVANT, so check for IRRELEVANT first
     return !verdict.includes("IRRELEVANT");
   } catch {
-    // Fail-open: if classification errors, allow the message through
-    return true;
+    // Fail-closed: if classifier errors, reject to prevent off-topic responses
+    return false;
   }
 };
 
@@ -171,11 +171,15 @@ ${Object.entries(typeCounts)
 Total Edges : ${edges.length}
 Relation types: ${relations.join(", ")}
 
-Process flow:
+Core O2C process flow:
   Customer --[places]--> Sales Order --[fulfilled_by]--> Delivery
   Delivery --[generates]--> Billing Document
   Billing Document --[creates_journal]--> Journal Entry
   Journal Entry --[settled_by]--> Payment
+
+Supporting entity relations:
+  Billing Document --[billed_for]--> Product (material sold)
+  Delivery --[ships_from]--> Plant (shipping location)
 ====================================`;
 };
 
@@ -221,8 +225,15 @@ const buildNodeContext = (message) => {
 const SYSTEM_INTRO = `You are Dodge AI, an intelligent graph agent specializing in SAP Order to Cash (O2C) process analysis.
 
 You help users explore and understand the O2C business graph which contains:
-- Customers, Sales Orders, Deliveries, Billing Documents, Journal Entries, and Payments
-- Their relationships through the full O2C cycle
+- Core flow: Customers → Sales Orders → Deliveries → Billing Documents → Journal Entries → Payments
+- Supporting entities: Products (materials billed) and Plants (shipping locations)
+
+EXAMPLE QUERIES YOU CAN ANSWER:
+- Which products are associated with the highest number of billing documents?
+- Trace the full flow of a given billing document (Sales Order → Delivery → Billing → Journal Entry)
+- Identify sales orders that have broken or incomplete flows (e.g. delivered but not billed, billed without delivery)
+- What is the total amount for a specific customer's orders or payments?
+- Which plants handle the most deliveries?
 
 STRICT RULES — follow these without exception:
 - ONLY answer questions about the O2C graph data, SAP business process, and entities in this dataset
@@ -231,7 +242,8 @@ STRICT RULES — follow these without exception:
 - When specific IDs are mentioned, use the node data provided in context
 - Be concise, factual, and precise — every claim must be backed by data in the context
 - If data is not available in context, say so clearly — do NOT invent or guess values
-- Format document numbers and IDs clearly in your responses`;
+- Format document numbers and IDs clearly in your responses
+- For broken/incomplete flow queries, explicitly list the missing steps in the chain`;
 
 // ── Main chat function (Groq) ───────────────────────────────
 

@@ -46,8 +46,8 @@ const GraphCanvas = ({
   );
 
   const handleEdgeClick = useCallback(
-    (_, edge) => {
-      onEdgeClick?.(edge);
+    (event, edge) => {
+      onEdgeClick?.(edge, { x: event.clientX, y: event.clientY });
     },
     [onEdgeClick]
   );

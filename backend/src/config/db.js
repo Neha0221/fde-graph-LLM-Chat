@@ -2,7 +2,10 @@ const Database = require("better-sqlite3");
 const path = require("path");
 const fs = require("fs");
 
-const DB_PATH = path.resolve(__dirname, "../../data/graph.db");
+const { DB_PATH: DB_PATH_ENV } = require("./env");
+const DB_PATH = path.isAbsolute(DB_PATH_ENV)
+  ? DB_PATH_ENV
+  : path.resolve(__dirname, "../../", DB_PATH_ENV);
 
 // ensure data directory exists
 const dataDir = path.dirname(DB_PATH);

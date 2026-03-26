@@ -4,7 +4,7 @@ A context graph system with an LLM-powered conversational query interface built 
 
 ---
 
-## Live Demo
+## [Live Demo](https://fde-graph-llm-chat-frontend.onrender.com/)
 
 > Run locally using the setup instructions below. No cloud deployment configured.
 

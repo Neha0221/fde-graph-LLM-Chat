@@ -330,8 +330,3 @@ fde-graph-assignment/
 
 ---
 ## [Demo Video](https://drive.google.com/file/d/1FNc1cv0qTPVK83TTTtr9xbfYbCSd8XD_/view?usp=sharing)
-
-- Graph layout uses deterministic random scatter — not force-directed, so some nodes may overlap at high density
-- Chat history is not persisted across page refreshes
-- SQL generation quality depends on the LLM; complex multi-join queries may occasionally be imprecise
-- Classifier fail-closed means a Groq outage blocks all chat queries

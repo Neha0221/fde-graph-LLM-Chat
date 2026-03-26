@@ -86,80 +86,145 @@ Products and Plants are only included if they are **actually referenced** in the
 
 ---
 
-## Database Choice
+## Database and Storage Choice
 
-**SQLite via `better-sqlite3`**
+### Architecture: Hybrid Relational + Derived In-Memory Graph
 
-- Synchronous API reduces complexity; no async DB layer needed
-- WAL mode enabled for safe concurrent reads
-- All raw data is seeded from JSONL source files via `npm run seed`
-- Schema enforces FK constraints (`PRAGMA foreign_keys = ON`)
+This system uses a **two-layer storage design**, which is the central architectural decision of the backend:
 
-**Tradeoff:** SQLite is not suitable for multi-user production workloads, but is ideal for this local single-user analytical system.
+| Layer | Technology | Role |
+|-------|-----------|------|
+| **Persisted store** | SQLite (`better-sqlite3`) | Canonical source of truth for all O2C entities ingested from JSONL |
+| **Graph projection** | In-memory JS objects | Typed nodes and edges derived at request time from SQL joins |
+
+The source dataset is inherently **relational and transactional** — sales orders referencing customers, delivery items referencing sales orders, billing items referencing deliveries. Storing it in a relational database is the natural fit: FK constraints can be enforced, cross-entity aggregations can run as standard SQL, and the data remains queryable both structurally (graph traversal) and analytically (aggregations, filters).
+
+The graph is **not stored separately**. Every call to `GET /api/graph` triggers `graph.service.js` to execute ~14 SQL queries, construct typed node and edge objects, deduplicate by ID, and return a JSON graph. This means the graph is always a live, consistent view of the database — no sync lag, no separate graph store to maintain.
+
+### Why SQLite specifically
+
+- **`better-sqlite3` uses a synchronous API** — no async DB layer, no connection pool, no promise chains. The entire graph build is a straightforward sequence of `.prepare().all()` calls.
+- **WAL (Write-Ahead Log) mode** is enabled on connection (`PRAGMA journal_mode = WAL`), allowing safe concurrent reads without blocking the server during the occasional seed/migrate write.
+- **Foreign key constraints** (`PRAGMA foreign_keys = ON`) are enforced at the DB level, catching referential integrity issues at seed time rather than at query time.
+- **Schema-first design** — `schema.sql` defines all 14 tables with composite PKs and FKs before any data is loaded. The migrate → seed order ensures parent rows always exist before child rows.
+- **Zero-ops deployment** — the database is a single `.db` file (`data/graph.db`), tracked in `.gitignore`, reproducible at any time via `npm run migrate && npm run seed`.
+
+### Tradeoffs
+
+| Concern | Decision |
+|---------|---------|
+| **Graph rebuilt per request** | Acceptable for a single-user local tool; the full graph build takes milliseconds on this dataset size. A production system would cache the graph or maintain a materialized view. |
+| **No graph-native query language** | Cypher/Gremlin traversals would be more expressive for multi-hop path queries. Here, those are emulated via JOIN chains in SQL + in-memory neighbor lookup in JS. |
+| **No write concurrency** | SQLite handles one writer at a time. Not a constraint for this read-heavy, single-user workload. |
+| **Alternatives considered** | Neo4j or Amazon Neptune would provide native graph traversal and indexing at scale, but add significant operational overhead (separate server, auth, Bolt protocol) that is unnecessary for this scope. PostgreSQL with `ltree` or `recursive CTEs` was also considered but offers no meaningful advantage over SQLite here. |
 
 ---
 
 ## LLM Integration and Prompting Strategy
 
-### Three-stage pipeline per chat message
+### Design Philosophy
 
-**Stage 1 — Topic Guardrail (fast classifier)**
+The LLM is used **as an orchestration layer**, not as a knowledge source. Every answer it gives must be grounded in data retrieved from SQLite or the graph — the model is explicitly forbidden from inventing values. The prompting architecture enforces this through structured context injection and strict output formatting rules.
+
+### Three-Stage Pipeline
+
+Each chat message flows through three sequential LLM calls:
+
 ```
-Model: llama-3.1-8b-instant
-Temperature: 0
-Max tokens: 5
-Output: RELEVANT | IRRELEVANT
-Behavior: Fail-closed (errors → reject)
+User message
+     │
+     ▼
+┌─────────────────────────────────────────┐
+│  Stage 1: Topic Guardrail               │
+│  Model  : llama-3.1-8b-instant          │
+│  Temp   : 0  │  Max tokens: 5           │
+│  Output : RELEVANT or IRRELEVANT        │
+│  Behavior: fail-closed on any error     │
+└────────────────────┬────────────────────┘
+                     │ RELEVANT only
+                     ▼
+┌─────────────────────────────────────────┐
+│  Stage 2: Text-to-SQL Generation        │
+│  Model  : llama-3.1-8b-instant          │
+│  Temp   : 0  │  Max tokens: 500         │
+│  Output : Raw SELECT statement          │
+│           or the literal word NO_SQL    │
+│  Rules  : SELECT only, LIMIT 20,        │
+│           standard SQLite syntax        │
+│  → SQL is executed against SQLite       │
+│  → Results injected as context          │
+└────────────────────┬────────────────────┘
+                     │ SQL results + graph context
+                     ▼
+┌─────────────────────────────────────────┐
+│  Stage 3: Answer Synthesis              │
+│  Model  : llama-3.1-8b-instant          │
+│  Temp   : 0.3  │  Max tokens: 1024      │
+│  Context: system intro                  │
+│           + graph summary               │
+│           + node/neighbor context       │
+│           + LIVE DATABASE QUERY RESULTS │
+│           + conversation history        │
+└─────────────────────────────────────────┘
 ```
 
-**Stage 2 — Text-to-SQL (parallel with graph context)**
-```
-Model: llama-3.1-8b-instant
-Temperature: 0
-Max tokens: 500
-Output: Raw SELECT statement or NO_SQL
-Rules: SELECT only, LIMIT 20, standard SQLite syntax
-```
-Results are executed against SQLite and injected into the main system context as `LIVE DATABASE QUERY RESULTS`.
+### Context Injection Strategy
 
-**Stage 3 — Answer synthesis**
-```
-Model: llama-3.1-8b-instant
-Temperature: 0.3
-Max tokens: 1024
-Context: system intro + graph summary + node context + SQL results + conversation history
-```
+Every Stage 3 call receives a composed system prompt built from four sources:
 
-### Context injection
+1. **System intro + role definition** — establishes the model as a domain-restricted O2C analyst and lists strict behavioral rules (no hallucination, no off-topic responses, always cite data).
 
-Each query receives:
-1. **Graph summary** — node/edge counts by type, full relation map
-2. **Node context** — if the message contains 5+ digit IDs, matching nodes and their neighbors are fetched and injected
-3. **SQL results** — live query results formatted as JSON (truncated at 4000 chars if needed)
+2. **Graph summary** — dynamically generated from the live database: total node/edge counts broken down by type, and the full relation map. This gives the model structural awareness of the dataset without passing all node data.
+
+3. **Node context (ID-triggered)** — if the user message contains any 5+ digit number, the backend pattern-matches it against node IDs and field values, then injects the matching node's full metadata plus all its connected neighbors and edge relations. This enables precise document trace queries (e.g. "trace billing document 9012345678").
+
+4. **Live SQL results** — the output of Stage 2 is executed against SQLite and injected verbatim as `LIVE DATABASE QUERY RESULTS`. The Stage 3 prompt explicitly instructs the model to treat these as the primary source of truth. Results are capped at 4000 characters to avoid context window overflow.
+
+### Prompt Design Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| **Temperature 0 for guardrail and SQL** | Deterministic outputs — the classifier must always output exactly `RELEVANT`/`IRRELEVANT`; the SQL generator must produce syntactically valid SQL, not creative variations. |
+| **Temperature 0.3 for answer synthesis** | Slightly relaxed to allow natural, readable prose while still staying grounded in provided data. |
+| **Explicit `NO_SQL` escape hatch in SQL stage** | Conceptual questions (e.g. "what does an O2C flow look like?") cannot be answered by a SQL query. The model is instructed to return `NO_SQL` in those cases; the pipeline skips SQL execution and proceeds with graph context only. |
+| **Full schema injected into SQL prompt** | The model receives all 14 table definitions with column names, types, and FK relationships. This dramatically reduces hallucinated column names and invalid JOIN paths. |
+| **IRRELEVANT check catches the RELEVANT substring** | `verdict.includes("IRRELEVANT")` is checked before the RELEVANT branch — necessary because `"IRRELEVANT"` contains the substring `"RELEVANT"`. A naive string-equality check would misclassify off-topic responses. |
+| **Conversation history threaded through** | The validated history array is appended before the current user message in Stage 3, enabling multi-turn follow-up queries within a session. |
+
+### LLM Provider
+
+`llama-3.1-8b-instant` via [Groq](https://console.groq.com) is used for all three stages. Groq's inference API provides sub-second latency on this model, which keeps the three-stage pipeline responsive. The codebase also retains commented-out `@google/generative-ai` code for Gemini (`gemini-2.0-flash-lite`) as an alternative provider that can be swapped in by uncommenting the relevant block in `chat.service.js`.
 
 ---
 
 ## Guardrails
 
-### Off-topic rejection
+### 1. Off-Topic Domain Restriction
 
-Every message passes through a strict one-shot classifier before the main LLM is called. The classifier is instructed to output only `RELEVANT` or `IRRELEVANT`.
+Every message passes through a dedicated one-shot classifier (Stage 1) before any expensive LLM call or database query is made. The classifier receives a tightly scoped system prompt listing exactly what is `RELEVANT` (O2C entities, SAP process, graph analysis) and what is `IRRELEVANT` (general knowledge, coding help, creative writing, current events).
 
-**Fail-closed:** If the classifier call errors (network, rate-limit), the message is rejected, not allowed through.
+**Fail-closed behavior:** if the Groq API call itself throws an error (network timeout, rate limit, service outage), the `catch` block returns `false` — the message is treated as irrelevant and rejected. This prevents off-topic queries from slipping through during partial outages.
 
-**Rejection response:**
+**Fixed rejection response:**
 > "This system is designed to answer questions related to the provided dataset only. I can help you explore the Order to Cash (O2C) process — customers, sales orders, deliveries, billing documents, journal entries, and payments."
 
-### Input validation
+### 2. Input Validation (Server-Side)
 
-- `message` field: required, must be non-empty string
-- `history` field: must be array; each item must have `role` (`user`|`assistant`) and string `content`; invalid items are silently filtered
+Validated in `chat.controller.js` before the service layer is ever called:
 
-### SQL injection prevention
+- `message`: required field, must be a non-empty string (returns HTTP 400 otherwise)
+- `history`: must be an array; each entry must have `role` of `"user"` or `"assistant"` and a string `content` — any entry failing this shape is silently filtered out before being passed to the LLM
 
-- Only `SELECT` statements are executed
-- Any generated SQL not starting with `SELECT` is discarded before execution
-- `better-sqlite3` uses parameterized prepared statements throughout the seed/migrate layer
+### 3. SQL Safety
+
+Generated SQL is sandboxed at two levels:
+
+- **Statement-level check:** any SQL that does not begin with `SELECT` (case-insensitive) is discarded before execution — `INSERT`, `UPDATE`, `DELETE`, `DROP`, `CREATE`, and all DDL/DML variants are blocked.
+- **Prepared statements:** `better-sqlite3`'s `.prepare()` API is used throughout `seed.js` and the chat service. Parameters are bound positionally (`?`), never via string interpolation, preventing SQL injection through user-controlled input.
+
+### 4. Answer Grounding
+
+The Stage 3 system prompt contains an explicit instruction: *"When LIVE DATABASE QUERY RESULTS are provided below, base your answer primarily on those results — they are real data from the database"* and *"do NOT invent or guess values."* If no SQL results are available and no node context is matched, the model is instructed to say so clearly rather than hallucinate an answer.
 
 ---
 

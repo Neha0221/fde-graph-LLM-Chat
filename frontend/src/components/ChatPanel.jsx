@@ -1,4 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { sendChatMessage } from '../api/graphApi';
 
 const INITIAL_MESSAGES = [
@@ -107,7 +109,15 @@ const ChatPanel = () => {
                   Dodge AI <span className="chat-bubble-role">Graph Agent</span>
                 </p>
               )}
-              <p className="chat-bubble-text">{msg.text}</p>
+              {msg.sender === 'ai' ? (
+                <div className="chat-bubble-text chat-markdown">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    {msg.text}
+                  </ReactMarkdown>
+                </div>
+              ) : (
+                <p className="chat-bubble-text">{msg.text}</p>
+              )}
             </div>
           </div>
         ))}
